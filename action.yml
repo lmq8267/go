@@ -1,0 +1,52 @@
+name: 部署 Go 工具链 (linux/amd64)
+description: >-
+  从当前/指定仓库的最新 Release(或指定 tag)下载并部署 Go 官方工具链(linux/amd64),
+  校验 SHA256、安装到全局目录,并写入 PATH / GOROOT,使调用方当前 job 的后续步骤
+  可直接执行 go 命令。全程中文彩色日志输出。通过 uses: <owner>/<repo>@main 引用。
+  (核心脚本 scripts/deploy-go.sh;本仓库编译的 Go 工具链用于修复 MIPS 系列
+   runtime 问题,详见 README 与 golang/go#77730)
+
+inputs:
+  source-repo:
+    description: '发布 Go 工具链的仓库,格式 owner/repo;留空默认调用方当前仓库'
+    required: false
+    default: ''
+  tag:
+    description: '指定 Release tag;留空则部署最新 Release'
+    required: false
+    default: ''
+  install-dir:
+    description: 'GOROOT 安装目录(需与发布包 GOROOT_FINAL 一致,默认 /usr/local/go)'
+    required: false
+    default: '/usr/local/go'
+  token:
+    description: '用于访问 Release 的 token(默认自动使用 GITHUB_TOKEN;私有仓库需传入高权限 token)'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  go-version:
+    description: '部署的 Go 版本(go version 输出)'
+    value: ${{ steps.deploy.outputs.go_version }}
+  go-root:
+    description: 'GOROOT 安装目录'
+    value: ${{ steps.deploy.outputs.go_root }}
+  release-url:
+    description: '部署的 Release 页面链接'
+    value: ${{ steps.deploy.outputs.release_url }}
+  tag:
+    description: '部署的 Release tag 名'
+    value: ${{ steps.deploy.outputs.tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: 下载并部署最新 Go 工具链 Release
+      id: deploy
+      shell: bash
+      env:
+        SOURCE_REPO: ${{ inputs.source-repo }}
+        TAG_ARG: ${{ inputs.tag }}
+        INSTALL_DIR: ${{ inputs.install-dir }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: bash "${{ github.action_path }}/scripts/deploy-go.sh"

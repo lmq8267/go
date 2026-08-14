@@ -1,0 +1,207 @@
+name: 测试mipsel版cloudflared
+
+# =============================================================================
+# 端到端验证: 用「当前仓库」发布的最新 Go 工具链,交叉编译 cloudflared
+# (GOOS=linux GOARCH=mipsle GOMIPS=softfloat),再经 qemu-mipsel 运行验证
+#
+# 手动触发: Actions → 该工作流 → Run workflow
+#   输入 tag 指定测试某 Release,留空 = 测试最新 Release。
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '使用指定 Release tag 的 Go 工具链测试(留空 = 最新 Release)'
+        required: false
+        default: ''
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  test_cloudfalred:
+    name: 用当前仓库 Go 工具链编译并运行 cloudflared (mipsel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出Cloudflared仓库
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 1
+          repository: cloudflare/cloudflared
+      # 运行平台判断: 本 Go 工具链仅支持 linux/amd64,其他平台直接拒绝,避免误用
+      - name: 检查运行平台 (linux/amd64)
+        run: |
+          C_RESET=$'\033[0m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_BLUE=$'\033[34m'
+          ok()  { printf '  %s✔ %s%s\n' "$C_GREEN" "$C_RESET" "$*"; }
+          err() { printf '  %s✘ %s%s\n' "$C_RED"   "$C_RESET" "$*" >&2; }
+          set -euo pipefail
+          os="$(uname -s)"; arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64)            arch="amd64" ;;
+            aarch64|arm64)           arch="arm64" ;;
+            i386|i486|i586|i686|x86) arch="386" ;;
+          esac
+          echo "当前 runner: ${os}/${arch}"
+          if [ "$os" != "Linux" ] || [ "$arch" != "amd64" ]; then
+            err "本流程依赖的 Go 工具链仅支持 linux/amd64 (x86-64)。"
+            err "请改用 ubuntu-latest 等 x86-64 Linux runner 后重试。"
+            exit 1
+          fi
+          ok "运行平台校验通过 (Linux/amd64)"
+      - name: 部署当前仓库最新 Go 工具链
+        id: deploy
+        uses: lmq8267/go@main
+        with:
+          tag: ${{ inputs.tag || '' }}
+          install-dir: /usr/local/go
+
+      - name: 安装 UPX
+        uses: crazy-max/ghaction-upx@master
+        with:
+          version: v4.2.4
+          install-only: true
+
+      - name: 交叉编译 cloudflared (linux/mipsle)
+        run: |
+          # 中文彩色日志工具
+          C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+          C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+          C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'; C_CYAN=$'\033[36m'
+          info()  { printf '  %s■ %s%s\n' "$C_BLUE"  "$C_RESET" "$*"; }
+          ok()    { printf '  %s✔ %s%s\n' "$C_GREEN" "$C_RESET" "$*"; }
+          warn()  { printf '  %s⚠ %s%s\n' "$C_YELLOW" "$C_RESET" "$*"; }
+          err()   { printf '  %s✘ %s%s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+          section(){ local t="$*" line="" i; for ((i=0;i<${#t};i++)); do line+="━"; done; \
+                     printf '\n%s━━ %s ━━%s\n' "$C_MAGENTA$C_BOLD" "$t" "$C_RESET"; }
+          set -euo pipefail
+
+          section "交叉编译 cloudflared · GOOS=linux GOARCH=mipsle"
+          info "Go 工具链: $(go version)"
+          info "编译参数: CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat"
+
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          sed -i "s|-ldflags='|-ldflags=' -s -w |g" ./Makefile
+
+          info "开始 make cloudflared ..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat make cloudflared 2>&1 | tee "$RUNNER_TEMP/compile.log"
+          ok "编译完成: cloudflared ($(ls -lh cloudflared | awk '{print $5}'))"
+
+          info "UPX 压缩 ..."
+          upx --lzma --best cloudflared 2>&1 | tee -a "$RUNNER_TEMP/compile.log"
+          ok "UPX 压缩完成: $(ls -lh cloudflared | awk '{print $5}')"
+          file cloudflared | sed 's/^/  类型: /'
+
+      - name: qemu-mipsel 运行测试
+        run: |
+          # 中文彩色日志工具
+          C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+          C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+          C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'; C_CYAN=$'\033[36m'
+          info()  { printf '  %s■ %s%s\n' "$C_BLUE"  "$C_RESET" "$*"; }
+          ok()    { printf '  %s✔ %s%s\n' "$C_GREEN" "$C_RESET" "$*"; }
+          warn()  { printf '  %s⚠ %s%s\n' "$C_YELLOW" "$C_RESET" "$*"; }
+          err()   { printf '  %s✘ %s%s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+          section(){ local t="$*" line="" i; for ((i=0;i<${#t};i++)); do line+="━"; done; \
+                     printf '\n%s━━ %s ━━%s\n' "$C_MAGENTA$C_BOLD" "$t" "$C_RESET"; }
+          set -euo pipefail
+
+          section "qemu-mipsel 运行测试"
+          # 系统自带 qemu 4.2 可能对 mipsel 上 Go 的实时信号支持不完整(sigaction failed)，
+          # 改用 newqemu 7.2 来测试
+          info "下载 qemu-mipsel-static (v7.2.0-1) ..."
+          curl -sL -o /tmp/qemu-mipsel-static "https://github.com/multiarch/qemu-user-static/releases/download/v7.2.0-1/qemu-mipsel-static"
+          chmod +x /tmp/qemu-mipsel-static
+          info "运行 ./cloudflared -h (qemu-mipsel) ..."
+          echo "===== cloudflared -h (qemu-mipsel) ====="
+          if ! /tmp/qemu-mipsel-static ./cloudflared -h 2>&1 | tee "$RUNNER_TEMP/run.log"; then
+            err "qemu-mipsel 运行 cloudflared -h 失败"
+            exit 1
+          fi
+          if grep -q "cloudflared" "$RUNNER_TEMP/run.log"; then
+            ok "帮助输出正常(包含关键字 cloudflared)"
+          else
+            err "cloudflared -h 输出异常: 未找到 cloudflared 关键字"
+            exit 1
+          fi
+          ok "qemu-mipsel 运行测试通过 ✔"
+
+      - name: 上传 cloudflared 产物工件
+        if: success()
+        uses: actions/upload-artifact@main
+        with:
+          name: cloudflared-linux-mipsel
+          path: cloudflared
+          if-no-files-found: error
+
+      # 无论成功 / 失败 / 取消,都输出详细测试报告到 GITHUB_STEP_SUMMARY
+      - name: 输出测试摘要(成功 / 失败)
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          GO_VERSION: ${{ steps.deploy.outputs.go-version }}
+          GO_ROOT: ${{ steps.deploy.outputs.go-root }}
+          RELEASE_URL: ${{ steps.deploy.outputs.release-url }}
+          TAG_ARG: ${{ inputs.tag || '' }}
+        run: |
+          set -u
+          case "$JOB_STATUS" in
+            success)   BADGE="✅ **成功**" ;;
+            failure)   BADGE="❌ **失败**" ;;
+            cancelled) BADGE="⚠️ **已取消**" ;;
+            *)         BADGE="\`$JOB_STATUS\`" ;;
+          esac
+          {
+            echo "# 🧪 Go 工具链 → cloudflared (mipsel) 测试报告"
+            echo
+            echo "> 使用当前仓库发布的最新 Go 工具链交叉编译 cloudflared,并经 qemu-mipsel 运行验证。"
+            echo
+            echo "## 📋 测试结果：$BADGE"
+            echo
+            echo "| 项目 | 信息 |"
+            echo "|---|---|"
+            echo "| 测试结果 | $BADGE |"
+            echo "| Go 工具链 | \`${GO_VERSION:-未部署成功}\` |"
+            echo "| Release tag | \`${TAG_ARG:-最新}\` |"
+            echo "| GOROOT | \`${GO_ROOT:-—}\` |"
+            echo "| 目标平台 | \`linux/mipsle\` (GOMIPS=softfloat, CGO_ENABLED=0) |"
+            echo "| 压缩 | UPX --lzma --best |"
+            echo
+            if [ -n "${RELEASE_URL:-}" ]; then
+              echo "**使用的 Release**：[${RELEASE_URL}](${RELEASE_URL})"
+              echo
+            fi
+            if [ -f ./cloudflared ]; then
+              echo "**cloudflared 产物大小**：\`$(ls -lh ./cloudflared | awk '{print $5}')\`"
+              echo
+            fi
+            echo "## 🔗 相关链接"
+            echo
+            echo "- [本次构建运行](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+            if [ -n "${RELEASE_URL:-}" ]; then
+              echo "- [Go 工具链 Release](${RELEASE_URL})"
+            fi
+            echo
+            if [ -f "$RUNNER_TEMP/run.log" ]; then
+              echo "## 🖥️ qemu-mipsel 运行输出"
+              echo
+              echo '```text'
+              head -n 60 "$RUNNER_TEMP/run.log"
+              echo '```'
+              echo
+            fi
+            if [ -f "$RUNNER_TEMP/compile.log" ]; then
+              echo "## 📜 编译日志"
+              echo
+              echo "<details><summary>展开查看编译日志</summary>"
+              echo
+              echo '```text'
+              sed 's/\x1b\[[0-9;]*m//g; s/\r//g' "$RUNNER_TEMP/compile.log" | tail -n 150
+              echo '```'
+              echo
+              echo "</details>"
+              echo
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "已输出测试摘要到 GITHUB_STEP_SUMMARY"

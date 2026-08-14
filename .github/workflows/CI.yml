@@ -1,0 +1,98 @@
+name: 构建并发布 Go 工具链
+
+# =============================================================================
+# 手动触发：在 Actions 页面点击 "Run workflow"，
+# 填写分支后自动编译 Go 官方源码 (linux/amd64) 并打包发布到 Releases。
+#   输入项：go-branch —— Go 源码分支，默认 master
+# =============================================================================
+on:
+  workflow_dispatch:
+    inputs:
+      go-branch:
+        description: 'Go 源码分支（默认 master，例如 release-branch.go1.27）'
+        required: false
+        default: 'master'
+
+permissions:
+  contents: write   # 创建 Release / 上传资产
+  actions: write    # 清理历史运行记录
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Shanghai
+  GO_BRANCH: ${{ inputs.go-branch || 'master' }}
+  SCRIPT: ${{ github.workspace }}/scripts/go-toolchain-build.sh
+  # 说明: 顶层 env 不支持 runner context;脚本内统一使用 CI 自动注入的
+  # 环境变量 $RUNNER_TEMP 作为临时目录(见 go-toolchain-build.sh 顶部的默认值)。
+
+jobs:
+  build-go:
+    name: 构建与发布 Go 工具链 (linux/amd64)
+    runs-on: ubuntu-latest      # x86-64，直接产出 linux/amd64 工具链
+    timeout-minutes: 90
+    steps:
+      - name: 检出当前仓库
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 1
+
+      - name: 先清理失败与取消的运行记录
+        if: success()
+        continue-on-error: true
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 0
+          delete_workflow_pattern: ${{ github.workflow }}
+          delete_run_by_conclusion_pattern: "cancelled,failure"
+          
+      - name: 安装 Bootstrap Go
+        uses: actions/setup-go@main
+        with:
+          go-version: 'stable'
+          cache: false
+
+      - name: 获取 Go 源码与提交信息
+        run: bash "$SCRIPT" fetch-info
+
+      - name: 构建工具链 (linux/amd64)
+        run: bash "$SCRIPT" build
+
+      - name: 打包为官方发布格式并验证
+        if: success()
+        run: bash "$SCRIPT" package
+
+      - name: 收集构建工件到工作区
+        if: success()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$RUNNER_TEMP"/gosrc/go*.linux-amd64.tar.gz* "$GITHUB_WORKSPACE/artifacts/"
+          ls -lh "$GITHUB_WORKSPACE/artifacts/"
+
+      - name: 上传构建工件 (Go 工具链)
+        if: success()
+        uses: actions/upload-artifact@main
+        with:
+          name: go-toolchain-linux-amd64
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: 生成构建摘要与发布说明
+        if: always()            # 无论成败都输出到 GITHUB_STEP_SUMMARY
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          bash "$SCRIPT" summary
+          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 发布到 GitHub Releases
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash "$SCRIPT" release
+
